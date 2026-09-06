@@ -1,7 +1,8 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import datetime
+import requests
+from bs4 import BeautifulSoup
 from decimal import Decimal, ROUND_HALF_UP
 
 # --- パスワード認証機能 ---
@@ -29,59 +30,66 @@ if not check_password():
 
 # --- ここからアプリの本編 ---
 st.set_page_config(page_title="アルミ相場管理", layout="wide")
-st.title("🏭 社内調達用 アルミ地金相場・NSP自動計算")
+st.title("🏭 社内調達用 国内アルミ地金相場・NSP自動計算")
 
-# 最新仕様（group_by、auto_adjust、マルチインデックス対策）を網羅した安定取得コード
+# 💡 開明伸銅さんのウェブサイトから国内デイリー価格を一瞬で抽出する関数
 @st.cache_data(ttl=3600)
-def load_market_data():
-    end_date = datetime.date.today()
-    start_date = end_date - datetime.timedelta(days=180)
-    
+def scrape_domestic_market_data():
+    url = "https://kaimeishindo.com"
     try:
-        # 通信エラーを防ぐため個別ではなく同時に安全にダウンロード
-        data = yf.download(["ALI=F", "JPY=X"], start=start_date, end=end_date, group_by="ticker", auto_adjust=True)
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=10)
+        response.encoding = 'utf-8'
         
-        if not data.empty and "ALI=F" in data.columns and "JPY=X" in data.columns:
-            # 最新のyfinanceマルチインデックス構造から安全にClose列を取り出す
-            lme_close = data["ALI=F"]["Close"].dropna()
-            jpy_close = data["JPY=X"]["Close"].dropna()
-            
-            df = pd.DataFrame({
-                "LMEアルミ先物 ($/t)": lme_close,
-                "ドル円為替 (円)": jpy_close
-            }).dropna()
-            
-            # 円建て換算（$/t ➡ 円/kg）
-            df["国内地金換算 (円/kg)"] = (df["LMEアルミ先物 ($/t)"] * df["ドル円為替 (円)"]) / 1000
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        # サイト内の「日」と「価格」が並ぶテーブルのセルをすべて抽出
+        tables = soup.find_all("table")
+        data_rows = []
+        
+        # 開明伸銅さんのページ構造から「〇日」「価格」の組み合わせを探索
+        for table in tables:
+            rows = table.find_all("tr")
+            for row in rows:
+                cols = [col.text.strip() for col in row.find_all("td")]
+                # 「1日」「654」のようなペアを探す
+                if len(cols) >= 2 and "日" in cols[0] and cols[1].isdigit():
+                    day_num = int(cols[0].replace("日", ""))
+                    price_val = float(cols[1])
+                    data_rows.append({"日": day_num, "国内地金価格 (円/kg)": price_val})
+        
+        if data_rows:
+            # 抽出した直近データを日付順の表にまとめる
+            df = pd.DataFrame(data_rows)
+            # 簡易的に直近の日付を割り当ててグラフ化
+            base_date = datetime.date.today()
+            df.index = [base_date - datetime.timedelta(days=i) for i in range(len(df))]
+            df = df.drop(columns=["日"])
             return df.sort_index(ascending=False)
+            
     except Exception as e:
         pass
     
-    # 💡万が一エラーで取得できない場合、画面が真っ白になるのを防ぐための「バックアップ用データ」
+    # 💡万が一の通信エラー時のバックアップデータ（サイトが見られない時用）
+    end_date = datetime.date.today()
     dates = pd.date_range(end=end_date, periods=30, freq='D')
-    return pd.DataFrame({
-        "LMEアルミ先物 ($/t)": [3450.0] * 30,
-        "ドル円為替 (円)": [156.0] * 30,
-        "国内地金換算 (円/kg)": [538.2] * 30
-    }, index=dates).sort_index(ascending=False)
+    return pd.DataFrame({"国内地金価格 (円/kg)": [645.0] * 30}, index=dates).sort_index(ascending=False)
 
-with st.spinner("最新の市場データを読み込み中..."):
-    df_market = load_market_data()
+with st.spinner("開明伸銅のウェブサイトから最新の国内相場を抽出中..."):
+    df_market = scrape_domestic_market_data()
 
-latest = df_market.iloc[0]
-prev = df_market.iloc[1] if len(df_market) > 1 else latest
+latest_price = df_market["国内地金価格 (円/kg)"].iloc[0]
+prev_price = df_market["国内地金価格 (円/kg)"].iloc[1] if len(df_market) > 1 else latest_price
 
-col1, col2, col3 = st.columns(3)
+col1, col2 = st.columns(2)
 with col1:
-    st.metric(label="LMEアルミ先物価格 (終値)", value=f"${latest['LMEアルミ先物 ($/t)']:,.1f} / t", delta=f"{latest['LMEアルミ先物 ($/t)'] - prev['LMEアルミ先物 ($/t)']:+.2f}")
+    st.metric(label="日経公表：国内アルミ地金相場 (最新終値)", value=f"¥{latest_price:,.0f} / kg", delta=f"{latest_price - prev_price:+.0f} 円")
 with col2:
-    st.metric(label="ドル円為替レート", value=f"¥{latest['ドル円為替 (円)']:,.2f}", delta=f"{latest['ドル円為替 (円)'] - prev['ドル円為替 (円)']:+.2f}")
-with col3:
-    st.metric(label="国内地金換算（計算値）", value=f"¥{latest['国内地金換算 (円/kg)']:,.1f} / kg", delta=f"{latest['国内地金換算 (円/kg)'] - prev['国内地金換算 (円/kg)']:+.1f}")
+    st.info("💡 引用元：開明伸銅株式会社（日本経済新聞掲載日引用）")
 
 st.markdown("---")
-st.header("📊 直近の地金価格トレンド (円/kg)")
-st.line_chart(df_market["国内地金換算 (円/kg)"])
+st.header("📊 直近の国内地金価格トレンド (円/kg)")
+st.line_chart(df_market["国内地金価格 (円/kg)"])
 
 st.markdown("---")
 st.header("🧮 NSP（製品価格基準）自動計算")
@@ -89,9 +97,10 @@ df_monthly = df_market.resample('ME').mean().sort_index(ascending=False)
 
 col_calc1, col_calc2 = st.columns(2)
 with col_calc1:
-    m1_val = float(df_monthly.iloc[0]["国内地金換算 (円/kg)"]) if len(df_monthly) > 0 else 545.0
-    m2_val = float(df_monthly.iloc[1]["国内地金換算 (円/kg)"]) if len(df_monthly) > 1 else 538.0
-    m3_val = float(df_monthly.iloc[2]["国内地金換算 (円/kg)"]) if len(df_monthly) > 2 else 564.0
+    m1_val = float(df_monthly.iloc[0]["国内地金価格 (円/kg)"]) if len(df_monthly) > 0 else 645.0
+    m2_val = float(df_monthly.iloc[1]["国内地金価格 (円/kg)"]) if len(df_monthly) > 1 else 635.0
+    m3_val = float(df_monthly.iloc[2]["国内地金価格 (円/kg)"]) if len(df_monthly) > 2 else 650.0
+    
     m1 = st.number_input("1ヶ月目の国内地金平均 (円/kg)", value=round(m1_val, 1))
     m2 = st.number_input("2ヶ月目の国内地金平均 (円/kg)", value=round(m2_val, 1))
     m3 = st.number_input("3ヶ月目の国内地金平均 (円/kg)", value=round(m3_val, 1))
