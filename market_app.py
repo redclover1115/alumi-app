@@ -31,27 +31,26 @@ if not check_password():
 st.set_page_config(page_title="アルミ相場管理", layout="wide")
 st.title("🏭 社内調達用 アルミ地金相場・NSP自動計算")
 
-# 💡【対策】海外サーバーからのブロックを回避するため、取得方法をより強力な「日次データ個別取得」に変更
+# 最新仕様（group_by、auto_adjust、マルチインデックス対策）を網羅した安定取得コード
 @st.cache_data(ttl=3600)
 def load_market_data():
-    # 過去180日分のデータを確実に取得
     end_date = datetime.date.today()
     start_date = end_date - datetime.timedelta(days=180)
     
     try:
-        # LMEアルミ先物とドル円為替を個別にダウンロードしてタイムアウトを防ぐ
-        lme_ticker = yf.Ticker("ALI=F")
-        lme_data = lme_ticker.history(start=start_date, end=end_date)
+        # 通信エラーを防ぐため個別ではなく同時に安全にダウンロード
+        data = yf.download(["ALI=F", "JPY=X"], start=start_date, end=end_date, group_by="ticker", auto_adjust=True)
         
-        jpy_ticker = yf.Ticker("JPY=X")
-        jpy_data = jpy_ticker.history(start=start_date, end=end_date)
-        
-        if not lme_data.empty and not jpy_data.empty:
-            df_lme = pd.DataFrame({"LMEアルミ先物 ($/t)": lme_data["Close"]})
-            df_jpy = pd.DataFrame({"ドル円為替 (円)": jpy_data["Close"]})
+        if not data.empty and "ALI=F" in data.columns and "JPY=X" in data.columns:
+            # 最新のyfinanceマルチインデックス構造から安全にClose列を取り出す
+            lme_close = data["ALI=F"]["Close"].dropna()
+            jpy_close = data["JPY=X"]["Close"].dropna()
             
-            # 日付を基準に結合
-            df = df_lme.join(df_jpy, how="inner").dropna()
+            df = pd.DataFrame({
+                "LMEアルミ先物 ($/t)": lme_close,
+                "ドル円為替 (円)": jpy_close
+            }).dropna()
+            
             # 円建て換算（$/t ➡ 円/kg）
             df["国内地金換算 (円/kg)"] = (df["LMEアルミ先物 ($/t)"] * df["ドル円為替 (円)"]) / 1000
             return df.sort_index(ascending=False)
@@ -59,7 +58,6 @@ def load_market_data():
         pass
     
     # 💡万が一エラーで取得できない場合、画面が真っ白になるのを防ぐための「バックアップ用データ」
-    # これにより、通信エラー時でもグラフの枠と計算ツールが絶対に動くようになります
     dates = pd.date_range(end=end_date, periods=30, freq='D')
     return pd.DataFrame({
         "LMEアルミ先物 ($/t)": [3450.0] * 30,
@@ -83,7 +81,6 @@ with col3:
 
 st.markdown("---")
 st.header("📊 直近の地金価格トレンド (円/kg)")
-# グラフを綺麗に表示
 st.line_chart(df_market["国内地金換算 (円/kg)"])
 
 st.markdown("---")
